@@ -1,0 +1,325 @@
+#!/usr/bin/env node
+/*
+ * command line tool for node-pivotal
+ *
+ *
+ */
+var pivotal = require("../index.js"),
+    colors  = require("colors"),
+    tests   = null,
+    resNum  = 1,
+    username = process.env.username || null,
+    password = process.env.password || null,
+    token   = process.env.token || null,
+    debug   = (process.env.debug !== undefined),
+    defaultProjectId = parseInt(process.env.project_id,10) || null,
+    defaultStoryId = parseInt(process.env.story_id,10) || null,
+    defaultProjectMemberId = parseInt(process.env.member_id,10) || null;
+
+// shell mode
+var shell = require('shell');
+var stack = [];
+// command options & prompt
+var prompt = require('prompt');
+var optimist = require('optimist').usage('Usage: pivotal-cli', {
+  'username': {
+    description: 'username',
+    short: 'u',
+  },
+  'password': {
+    description: 'password',
+    short: 'p'
+  },
+  'token': {
+    description: 'Please input pivotal API token.',
+    short: 't'
+  }
+}).argv;
+
+// Default params
+var defaultLimit             = 10;
+var defaultOccurredSinceDate = null;  // ex. 2009/12/18 21:00:00 UTC
+var defaultNewerThanVersion  = 1;
+
+// cli args shema: TODO check the username, password and token spec
+var schema = {
+    properties : {
+        username : {
+            default : process.env.username,
+            pattern : /^[0-9a-zA-Z\-]+$/,
+            message : 'Name must be only letters, or dashes',
+            required: true,
+        },
+        password : {
+            default : process.env.password,
+            hidden : true,
+            required: true,
+        },
+        token : {
+            default : process.env.token,
+            pattern : /^[0-9a-z]+$/,
+            message : 'Name must be only numbers and letters.',
+            required: true,
+        }
+    }
+};
+prompt.override  = optimist.argv
+prompt.message   = '';
+prompt.delimiter = ':';
+
+// initial prompt: get inputs
+console.log('Please input username, password and token. (default: shell variables)'.cyan);
+prompt.start();
+prompt.get(schema, function(err, result) {
+
+    if (err) throw new Error('Error: prompt error.');
+    pivotal.useToken(result.token);
+
+    var app = new shell( { chdir: __dirname } );
+
+    app.configure(function() {
+        app.use(shell.history({
+            shell : app
+        }));
+        app.use(shell.completer({
+            shell : app
+        }));
+        app.use(shell.router({
+            shell : app
+        }));
+        app.use(shell.help({
+            shell : app,
+            introduction : true
+        }));
+    });
+
+    // Shell Mode Commands
+
+    // pamams
+    app.param('token', function(req, res, next) {
+        var token = req.params.token;
+        if (token) {
+            req.token = token;
+            next();
+        } else {
+            next( new Error('Error: no token') );
+        }
+    });
+    app.param('projectId', function(req, res, next) {
+        var id = req.params.projectId ? req.params.projectId : defaultProjectId;
+        if (id) {
+            req.projectId = id;
+            next();
+        } else {
+            next( new Error('Project ID ' + projectId + ' does not exist') );
+        }
+    });
+    /*
+    app.param('requiredProjectId', function(req, res, next) {
+        if (!req.params.requiredProjectId) {
+            next(new Error('Project ID ' + projectId + ' does not exist') );
+        } else {
+            next(new Error('hogeo ') );
+        }
+        var projectId = req.params.projectId ? req.params.projectId : defaultProjectId;
+        if (projectId) {
+            req.projectId = projectId;
+            next();
+        } else {
+            next( new Error('Project ID ' + projectId + ' does not exist') );
+        }
+    });
+    */
+    app.param('storyId', function(req, res, next) {
+        var storyId = req.params.storyId;
+        if (storyId) {
+            req.storyId = storyId;
+            next();
+        } else {
+            next( new Error('Story ID ' + storyId + ' does not exist') );
+        }
+    });
+    app.param('limit', function(req, res, next) {
+        var limit = req.params.limit ? req.params.limit : defaultLimit;
+        if (limit) {
+            req.limit = limit;
+            next();
+        } else {
+            next( new Error('Limit is not specified') );
+        }
+    });
+
+    // show env
+    app.cmd('env', 'show shell env. default settings.', function(req, res, next){
+        console.log('show env...'.grey);
+        console.log('');
+        console.log('username: '.cyan, username);
+        console.log('password: (not displayed)'.cyan);
+        console.log('token:    '.cyan, token);
+        console.log('default project id:        '.cyan, defaultProjectId);
+        console.log('default story id:          '.cyan, defaultStoryId);
+        console.log('default project member id: '.cyan, defaultProjectMemberId);
+        res.prompt();
+    });
+
+    // getToken
+    app.cmd('getToken', 'get token from API', function(req, res, next){
+        res.cyan('getting token...');
+        pivotal.getToken(username, password, function(err, res){
+            if (err){
+                console.log('');
+                console.log('Could not retrieve token. error: '.red,  err);
+                console.log('Check username and password by using config command.'.red);
+            } else {
+                console.log('Token: '.green, token);
+            }
+        });
+        res.prompt();
+    });
+
+    // useToken
+    app.cmd('useToken', 'set API token', function(req, res) {
+        res.cyan('set API token...token: ' + req.params.token);
+        pivotal.useToken(req.token, function(err, res){
+            if (err){
+                console.log('');
+                console.log('Could not set token. error: '.red,  err);
+                console.log('Check token by using config command.'.red);
+            } else {
+                console.log('Token is set: '.green, token);
+            }
+        });
+        res.prompt();
+    });
+
+    // getActivities: TODO implement options occurred_since_date, newer_than_version
+    app.cmd('getActivities :projectId :limit', 'show activities: getActivities [Project ID] [Limit]', function(req, res, next) {
+        console.log("Calling getActivities...Project ID is".grey, res.projectId);
+        var filters = {
+            project:             res.projectId,
+            limit:               res.limit,
+            //occurred_since_date: defaultOccurredSinceDate,
+            //newer_than_version:  defaultNewerThanVersion
+        };
+        pivotal.getActivities(filters, function (err, ret) {
+            var i;
+            if (err) {
+                console.log('');
+                console.log("Error".red, JSON.stringify(err));
+                throw new Error('API Error: getActivities error. filters: ', filters);
+            } else {
+                console.log("Got activities! ".green, ret.activity);
+                console.log('');
+                if (pivotal.debug) {
+                    for(i in ret.activity) {
+                        console.log("Activity:\n".green, JSON.stringify(ret.activity[i]).grey);
+                    }
+                }
+            }
+        });
+        res.prompt();
+    });
+
+    // getProjectActivities
+    app.cmd('getProjectActivities :projectId :limit', 'show project activities: getProjeActivities [Project ID] [Limit]', function(req, res, next) {
+        console.log("Calling getProjectActivities...".grey);
+        var filters = {
+            limit:               res.limit,
+            //occurred_since_date: defaultOccurredSinceDate,
+            //newer_than_version:  defaultNewerThanVersion
+        };
+        pivotal.getProjectActivities(res.projectId, filters, function (err, ret) {
+            var i;
+            if (err) {
+                console.log('');
+                console.log("Error".red, JSON.stringify(err));
+                throw new Error('API Error: getProjectActivities error. filters: ', filters);
+            } else {
+                console.log("Got project activities! ".green, ret.activity.length.toString().grey);
+                console.log(ret.activity); // TODO format the output
+                if (pivotal.debug) {
+                    for(i in ret.activity) {
+                        console.log("Project Activity:\n".green, JSON.stringify(ret.activity[i]).grey);
+                    }
+                }
+            }
+        });
+        res.prompt();
+    });
+
+    // getProjects:
+    app.cmd('getProjects', 'show projects: getProjects', function(req, res, next) {
+        console.log("Calling getProjects...".grey);
+        pivotal.getProjects(function (err, ret) {
+            var i;
+            if (err) {
+                console.log('');
+                console.log("Error".red, JSON.stringify(err));
+                throw new Error('API Error: getProjectActivities error. filters: ', filters);
+            } else {
+                // TODO format the output
+                console.log("Got projects! ".green);
+                console.log(ret.project);
+            }
+        });
+        res.prompt();
+    });
+
+    /*
+    // FIXME does not work getProject:
+    app.cmd('getProject :projectId', 'show project: getProject [Project ID]', function(req, res, next) {
+        if (!req.projectId) {
+            throw new Error('Error: No param: please set projectId: ', req.projectId);
+        }
+        console.log("Calling getProject...project id: ".grey, req.projectId);
+        pivotal.getProject(req.projectId, function (err, ret) {
+            if (err) {
+                console.log('');
+                console.log("Error".red, JSON.stringify(err));
+                throw new Error('API Error: getProject error. projectId: ', req.projectId);
+            } else {
+                // TODO format
+                console.log("Got project! project id: ".green, req.projectId);
+                console.log("project: ".green, ret);
+            }
+        });
+        res.prompt();
+    });
+    */
+
+    // TODO addProject
+    // TODO getMemberships
+    // TODO getMembership
+    // TODO addMembership
+    // TODO removeMembership
+    // TODO getIterations
+    // TODO getDoneIterations
+    // TODO getCurrentIteration
+    // TODO getBacklogIterations
+    // TODO getCurrentBacklogIterations
+    // TODO getStories
+    // TODO getStory
+    // TODO addStory
+    // TODO addStoryAttachment
+    // TODO addStoryComment
+    // TODO updateStory
+    // TODO moveStory
+    // TODO removeStory
+    // TODO deliverAllFinishedStories
+    // TODO getTasks
+    // TODO getTask
+    // TODO addTask
+    // TODO updateTask
+    // TODO removeTask
+
+
+    // TODO setUsername
+    // TODO setPassword
+    // TODO setToken
+
+});
+
+
+process.on('uncaughtException', function (err) {
+    console.log('uncaughtException => ' + err);
+});
